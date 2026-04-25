@@ -2,15 +2,18 @@
 
 Automates drawing images in "Tomodachi Life: Living the Dream" using a [SwiCC](https://github.com/knflrpn/SwiCC_RP2040) or [2wiCC](https://github.com/knflrpn/2wiCC) device controller. This tool allows you to convert PNG images into in-game artwork automatically.
 
-**This tool is not 100% complete, there are still a few things I'd like to change or add, but as it stands right now it works just fine.**
+**This tool is not 100% complete; there are still a few things I'd like to change or add, but as it stands right now, it works just fine.**
 
 > [!NOTE]
-> This was tested using the Welcome Version of Living the Dream. I do not have a copy of the full game at the moment. To my understanding the Mii creator is identical between the full game and Welcome Version, so I expect things to *just work*. Please alert me if something goes wrong.
+> This was tested using the Welcome Version of Living the Dream. I do not have a copy of the full game at the moment. To my understanding, the Mii creator is identical between the full game and Welcome Version, so I expect things to *just work*. Please alert me if something goes wrong.
 
 > [!IMPORTANT]
-> Tomodachi Life does not natively have semi-transparent colors, it is ***EXTREMELY*** recommended that you ensure that whatever image you are using does not make use of them, otherwise you may get some unexpected results in your import. (Alternatively, you could use `--quantize` to not only reduce the amount of colors in your image, but also remove any semi-transparent pixels.)
->
-> Due to using the dpad for all of its inputs, it is impossible to be super accurate with the color range. If it were possible to get consistent results by sending left stick inputs, then it *could* be possible to reach full color accuracy. This would need further testing, and honestly, attempting this is rather low on my priority list at the moment.
+> Tomodachi Life does not natively have semi-transparent colors; it is ***EXTREMELY*** recommended that you ensure that whatever image you are using does not make use of them, otherwise you may get some unexpected results in your import. (Alternatively, you could use `--quantize` to not only reduce the number of colors in your image, but also remove any semi-transparent pixels.)
+
+> [!WARNING]
+> **There are a couple of limitations with PaintMii:**
+> 1. Tomodachi Life runs at 30FPS; as such, the game can only receive inputs so fast. Currently, PaintMii presses and releases buttons at roughly 35ms, which is slightly slower than the time it takes to render a single frame at 30FPS (roughly 33ms). Because of this, images may take a while to recreate. [For example: the crunch bar I showcased with a earlier build of PaintMii took roughly 2+ hours.](https://x.com/GodsonTM_/status/2046443974798287077?s=20) ***There is no way to send controller inputs faster than this.***
+> 2. Due to using the D-Pad for all of its inputs, it is impossible to be super accurate with the color range. If it were possible to get consistent results by sending left stick inputs, then it *could* be possible to reach full color accuracy. This would need further testing, and honestly, attempting this is rather low on my priority list at the moment.
 
 
 ## Requirements
