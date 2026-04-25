@@ -9,6 +9,8 @@ Automates drawing images in "Tomodachi Life: Living the Dream" using a [SwiCC](h
 
 > [!IMPORTANT]
 > Tomodachi Life does not natively have semi-transparent colors, it is ***EXTREMELY*** recommended that you ensure that whatever image you are using does not make use of them, otherwise you may get some unexpected results in your import. (Alternatively, you could use `--quantize` to not only reduce the amount of colors in your image, but also remove any semi-transparent pixels.)
+>
+> Due to using the dpad for all of its inputs, it is impossible to be super accurate with the color range. If it were possible to get consistent results by sending left stick inputs, then it *could* be possible to reach full color accuracy. This would need further testing, and honestly, attempting this is rather low on my priority list at the moment.
 
 
 ## Requirements
