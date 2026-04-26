@@ -246,13 +246,44 @@ def home(ctrl, cursor_pos, simulate=False):
 # ============================================================
 # Color picker
 # ============================================================
+# Empirical correction tables derived by collecting colors via emulator. (Was getting much more accurate color results compared to capture card.)
+# Each table maps (predicted_value -> actual_presses_needed).
+# Values are interpolated linearly between data points.
 
 VAL_CORRECTION = [
-    (0,   111),
-    (66,  105),
-    (128,  88),
-    (192,  54),
-    (255,   0),
+    (  0, 111),  # Black
+    ( 32, 109),  # Very dark grey
+    ( 64, 105),  # Dark grey
+    ( 96,  98),  # Medium dark grey
+    (128,  87),  # Mid grey
+    (160,  72),  # Medium light grey
+    (192,  51),  # Light grey
+    (224,  28),  # Very light grey
+    (255,   0),  # White
+]
+
+SAT_CORRECTION = [
+    (  0,   0),  # No saturation
+    ( 52,  99),  # ~25% saturation
+    (106, 166),  # ~50% saturation
+    (159, 201),  # ~75% saturation
+    (212, 212),  # Full saturation
+]
+
+HUE_CORRECTION = [
+    (  0,   0),  # Pure red
+    ( 17,   7),  # Pink
+    ( 33,  33),  # Magenta
+    ( 50,  59),  # Purple
+    ( 67,  67),  # Pure blue
+    ( 83,  74),  # Sky blue
+    (100, 100),  # Cyan
+    (117, 126),  # Cyan-green
+    (133, 133),  # Pure green
+    (150, 141),  # Yellow-green
+    (167, 167),  # Yellow
+    (183, 193),  # Orange
+    (200, 200),  # Pure red (end)
 ]
 
 PALETTE_SIZE = 9
@@ -269,21 +300,25 @@ palette_state = {
 
 picker_initialized = False
 
-def brightness_to_val_presses(brightness):
-    brightness = max(0, min(255, brightness))
-    for i in range(len(VAL_CORRECTION) - 1):
-        b0, p0 = VAL_CORRECTION[i]
-        b1, p1 = VAL_CORRECTION[i + 1]
-        if b0 <= brightness <= b1:
-            t = (brightness - b0) / (b1 - b0)
-            return round(p0 + t * (p1 - p0))
-    return VAL_CORRECTION[-1][1]
+def interpolate_correction(table, value):
+    """Linearly interpolate a correction table for a given input value."""
+    value = max(table[0][0], min(table[-1][0], value))
+    for i in range(len(table) - 1):
+        x0, y0 = table[i]
+        x1, y1 = table[i + 1]
+        if x0 <= value <= x1:
+            t = (value - x0) / (x1 - x0)
+            return round(y0 + t * (y1 - y0))
+    return table[-1][1]
 
 def rgb_to_hsv_presses(r, g, b):
     h, s, v = colorsys.rgb_to_hsv(r/255, g/255, b/255)
-    hue_presses = round((1 - h) * 200) % 200
-    sat_presses = round(s * 212)
-    val_presses = brightness_to_val_presses(round(v * 255))
+    hue_raw = round((1 - h) * 200) % 200
+    sat_raw = round(s * 212)
+    val_raw = round(v * 255)
+    hue_presses = interpolate_correction(HUE_CORRECTION, hue_raw)
+    sat_presses = interpolate_correction(SAT_CORRECTION, sat_raw)
+    val_presses = interpolate_correction(VAL_CORRECTION, val_raw)
     return hue_presses, sat_presses, val_presses
 
 def navigate_hue(ctrl, slot, target_hue):
