@@ -288,17 +288,80 @@ HUE_CORRECTION = [
 
 PALETTE_SIZE = 9
 
+# Game's built-in color palette tab — 84 colors in a 7-row x 12-col grid.
+# Maps RGB -> (row, col) for direct palette navigation.
+# Row 0 is the TOP row, col 0 is the LEFT column.
+PALETTE_COLORS = {
+    (255,255,255): (0,  0), (241,240,248): (0,  1), (240,241,248): (0,  2),
+    (240,248,255): (0,  3), (240,251,244): (0,  4), (240,244,239): (0,  5),
+    (244,250,239): (0,  6), (253,252,239): (0,  7), (253,243,239): (0,  8),
+    (250,241,239): (0,  9), (252,237,220): (0, 10), (255,  0,  0): (0, 11),
+    (235,235,235): (1,  0), (208,200,233): (1,  1), (200,205,231): (1,  2),
+    (200,232,253): (1,  3), (200,241,216): (1,  4), (200,218,200): (1,  5),
+    (218,238,200): (1,  6), (252,249,200): (1,  7), (252,214,200): (1,  8),
+    (239,201,200): (1,  9), (229,207,177): (1, 10), (255,255,  0): (1, 11),
+    (213,213,212): (2,  0), (166,146,214): (2,  1), (146,158,212): (2,  2),
+    (146,214,253): (2,  3), (146,230,185): (2,  4), (146,189,148): (2,  5),
+    (187,225,148): (2,  6), (250,244,146): (2,  7), (249,180,146): (2,  8),
+    (226,150,146): (2,  9), (203,169,119): (2, 10), (  0,255,  0): (2, 11),
+    (188,188,188): (3,  0), (101,  0,195): (3,  1), (  0, 75,190): (3,  2),
+    (  0,194,252): (3,  3), (  0,218,145): (3,  4), (  0,150, 22): (3,  5),
+    (146,211, 22): (3,  6), (248,240,  0): (3,  7), (247,132,  0): (3,  8),
+    (213, 38,  0): (3,  9), (145, 98, 13): (3, 10), (  0,255,255): (3, 11),
+    (156,156,155): (4,  0), ( 85,  0,168): (4,  1), (  0, 64,165): (4,  2),
+    (  0,166,216): (4,  3), (  0,188,123): (4,  4), (  0,128, 13): (4,  5),
+    (125,181, 13): (4,  6), (213,206,  0): (4,  7), (212,113,  0): (4,  8),
+    (182, 34,  0): (4,  9), (119, 66,  0): (4, 10), (  0,  0,255): (4, 11),
+    (114,114,114): (5,  0), ( 66,  0,132): (5,  1), (  0, 50,129): (5,  2),
+    (  0,131,171): (5,  3), (  0,147, 96): (5,  4), (  0,101, 13): (5,  5),
+    ( 98,142, 13): (5,  6), (168,163,  0): (5,  7), (167, 88,  0): (5,  8),
+    (144, 22,  0): (5,  9), ( 93, 56, 13): (5, 10), (136,  0,255): (5, 11),
+    (  0,  0,  0): (6,  0), ( 34,  0, 75): (6,  1), (  0, 22, 73): (6,  2),
+    (  0, 73, 98): (6,  3), (  0, 85, 53): (6,  4), (  0, 56,  0): (6,  5),
+    ( 53, 81,  0): (6,  6), ( 96, 93,  0): (6,  7), ( 96, 46,  0): (6,  8),
+    ( 81, 13,  0): (6,  9), ( 53, 34, 13): (6, 10), (255,  0,195): (6, 11),
+}
+
+# Default sidebar colors and their palette positions (used for init navigation)
+DEFAULT_SIDEBAR = [
+    (  0,   0,   0),  # Slot 0: Black
+    (255, 255, 255),  # Slot 1: White
+    (145,  98,  13),  # Slot 2: Brown
+    (213,  38,   0),  # Slot 3: Red
+    (247, 132,   0),  # Slot 4: Yellow
+    (146, 211,  22),  # Slot 5: Lt green
+    (  0, 150,  22),  # Slot 6: Green
+    (  0,  75, 190),  # Slot 7: Blue
+    (101,   0, 195),  # Slot 8: Purple
+]
+
+def nearest_palette_color(r, g, b):
+    """Find the nearest palette color to (r,g,b) by Euclidean RGB distance.
+    Used to predict where the palette cursor will land after setting a color
+    via the Color Range tab."""
+    best = min(PALETTE_COLORS.keys(),
+               key=lambda c: (c[0]-r)**2 + (c[1]-g)**2 + (c[2]-b)**2)
+    return PALETTE_COLORS[best]
+
+# Global tab state — game remembers last used tab across all slots
+current_tab = "palette"  # starts on palette tab by default
+
+# Per-slot state — palette_row/col initialized from DEFAULT_SIDEBAR positions
 slot_picker_state = [
-    {"hue_pos": 0, "sat_pos": 0, "val_pos": 111}
-    for _ in range(PALETTE_SIZE)
+    {
+        "hue_pos":     0,
+        "sat_pos":     0,
+        "val_pos":     111,
+        "palette_row": PALETTE_COLORS[DEFAULT_SIDEBAR[slot]][0],
+        "palette_col": PALETTE_COLORS[DEFAULT_SIDEBAR[slot]][1],
+    }
+    for slot in range(PALETTE_SIZE)
 ]
 
 palette_state = {
-    "slots":       [(0, 0, 0)] * PALETTE_SIZE,
+    "slots":       list(DEFAULT_SIDEBAR),
     "active_slot": 0
 }
-
-picker_initialized = False
 
 def interpolate_correction(table, value):
     """Linearly interpolate a correction table for a given input value."""
@@ -348,12 +411,46 @@ def navigate_to_color(ctrl, slot, r, g, b):
         ctrl.move(ctrl.DPAD_UP, abs(dval))
     slot_picker_state[slot]["sat_pos"] = target_sat
     slot_picker_state[slot]["val_pos"] = target_val
+    # Predict where palette cursor will land if tab is switched later
+    pr, pc = nearest_palette_color(r, g, b)
+    slot_picker_state[slot]["palette_row"] = pr
+    slot_picker_state[slot]["palette_col"] = pc
+
+def switch_tab(ctrl, target_tab):
+    """Switch between Color Palette (L) and Color Range (R) tabs."""
+    global current_tab
+    if current_tab == target_tab:
+        return
+    if target_tab == "palette":
+        ctrl.press(ctrl.BTN_L, hold_ms=100, gap_ms=300)
+    else:
+        ctrl.press(ctrl.BTN_R, hold_ms=100, gap_ms=300)
+    current_tab = target_tab
+
+def navigate_to_palette_color(ctrl, slot, target_row, target_col):
+    """Navigate palette grid from current slot position to target and confirm."""
+    cur_row = slot_picker_state[slot]["palette_row"]
+    cur_col = slot_picker_state[slot]["palette_col"]
+    dr = target_row - cur_row
+    dc = target_col - cur_col
+    # NOTE: dpad down moves DOWN in the palette grid (increasing row index)
+    if dr > 0:
+        ctrl.move(ctrl.DPAD_DOWN, dr)
+    elif dr < 0:
+        ctrl.move(ctrl.DPAD_UP, abs(dr))
+    if dc > 0:
+        ctrl.move(ctrl.DPAD_RIGHT, dc)
+    elif dc < 0:
+        ctrl.move(ctrl.DPAD_LEFT, abs(dc))
+    ctrl.press(ctrl.BTN_A, hold_ms=100, gap_ms=300)
+    slot_picker_state[slot]["palette_row"] = target_row
+    slot_picker_state[slot]["palette_col"] = target_col
 
 def close_color_picker(ctrl):
     ctrl.press(ctrl.BTN_A, hold_ms=100, gap_ms=300)
 
 def initialize_palette(ctrl, simulate=False):
-    global picker_initialized
+    global current_tab
     for slot in range(PALETTE_SIZE):
         ctrl.press(ctrl.BTN_Y, hold_ms=100, gap_ms=300)
         delta = slot - palette_state["active_slot"]
@@ -362,18 +459,21 @@ def initialize_palette(ctrl, simulate=False):
         elif delta < 0:
             ctrl.move(ctrl.DPAD_UP, abs(delta))
         ctrl.press(ctrl.BTN_Y, hold_ms=100, gap_ms=500)
-        if not picker_initialized:
-            ctrl.press(ctrl.BTN_R, hold_ms=100, gap_ms=300)
-            picker_initialized = True
-        ctrl.move(ctrl.DPAD_DOWN, 111)
-        close_color_picker(ctrl)
-        palette_state["slots"][slot]       = (0, 0, 0)
-        palette_state["active_slot"]       = slot
-        slot_picker_state[slot]["hue_pos"] = 0
-        slot_picker_state[slot]["sat_pos"] = 0
-        slot_picker_state[slot]["val_pos"] = 111
+
+        # Navigate palette tab from this slot's current default color to black (6,0)
+        # current_tab starts as "palette" matching the game's default
+        navigate_to_palette_color(ctrl, slot, 6, 0)
+
+        palette_state["slots"][slot]            = (0, 0, 0)
+        palette_state["active_slot"]            = slot
+        slot_picker_state[slot]["hue_pos"]      = 0
+        slot_picker_state[slot]["sat_pos"]      = 0
+        slot_picker_state[slot]["val_pos"]      = 111
+        slot_picker_state[slot]["palette_row"]  = 6
+        slot_picker_state[slot]["palette_col"]  = 0
 
 def fill_palette_slot(ctrl, slot, r, g, b):
+    """Fill a palette slot — uses palette tab if color exists there, otherwise HSV range tab."""
     ctrl.press(ctrl.BTN_Y, hold_ms=100, gap_ms=300)
     delta = slot - palette_state["active_slot"]
     if delta > 0:
@@ -381,8 +481,21 @@ def fill_palette_slot(ctrl, slot, r, g, b):
     elif delta < 0:
         ctrl.move(ctrl.DPAD_UP, abs(delta))
     ctrl.press(ctrl.BTN_Y, hold_ms=100, gap_ms=500)
-    navigate_to_color(ctrl, slot, r, g, b)
-    close_color_picker(ctrl)
+
+    if (r, g, b) in PALETTE_COLORS:
+        target_row, target_col = PALETTE_COLORS[(r, g, b)]
+        switch_tab(ctrl, "palette")
+        navigate_to_palette_color(ctrl, slot, target_row, target_col)
+        # Store equivalent HSV presses so range tab navigation is correct if needed later
+        h_press, s_press, v_press = rgb_to_hsv_presses(r, g, b)
+        slot_picker_state[slot]["hue_pos"] = h_press
+        slot_picker_state[slot]["sat_pos"] = s_press
+        slot_picker_state[slot]["val_pos"] = v_press
+    else:
+        switch_tab(ctrl, "range")
+        navigate_to_color(ctrl, slot, r, g, b)
+        close_color_picker(ctrl)
+
     palette_state["slots"][slot] = (r, g, b)
     palette_state["active_slot"] = slot
 
@@ -630,7 +743,7 @@ class MockController(Controller):
 
 def calculate_time_estimate(color_pixels, batches, hold_ms=35, gap_ms=35):
     """Calculate time estimate by simulating the full draw process."""
-    global picker_initialized, palette_state, slot_picker_state
+    global current_tab, palette_state, slot_picker_state
     
     ctrl = MockController("2wicc", hold_ms=hold_ms, gap_ms=gap_ms)
     # Simulate the drawing without showing progress and with simulate mode enabled
@@ -648,14 +761,20 @@ def calculate_time_estimate(color_pixels, batches, hold_ms=35, gap_ms=35):
         phase_breakdown[phase_name] = seconds
     
     # Reset global state after simulation
-    picker_initialized = False
+    current_tab = "palette"
     palette_state = {
-        "slots":       [(0, 0, 0)] * PALETTE_SIZE,
+        "slots":       list(DEFAULT_SIDEBAR),
         "active_slot": 0
     }
     slot_picker_state = [
-        {"hue_pos": 0, "sat_pos": 0, "val_pos": 111}
-        for _ in range(PALETTE_SIZE)
+        {
+            "hue_pos":     0,
+            "sat_pos":     0,
+            "val_pos":     111,
+            "palette_row": PALETTE_COLORS[DEFAULT_SIDEBAR[slot]][0],
+            "palette_col": PALETTE_COLORS[DEFAULT_SIDEBAR[slot]][1],
+        }
+        for slot in range(PALETTE_SIZE)
     ]
     
     return {
