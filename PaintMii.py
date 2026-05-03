@@ -512,13 +512,67 @@ def switch_to_palette_slot(ctrl, target_slot):
     palette_state["active_slot"] = target_slot
 
 # ============================================================
-# Drawing
+# Drawing algorithms
 # ============================================================
 
-def draw_batch_snake(ctrl, grids, cursor_pos, progress=None, row_task=None, batch_pixels=0, simulate=False):
-    going_right = True
-    pixels_painted = 0
+def _collect_runs_for_row(grids, row_y):
+    """Collect all (run_start, run_end, slot) tuples for a given row across all grids."""
+    all_runs = []
+    for slot, grid in grids:
+        row = grid[row_y]
+        if not any(row):
+            continue
+        first_pixel = next(x for x in range(CANVAS_WIDTH) if row[x])
+        last_pixel  = next(x for x in range(CANVAS_WIDTH - 1, -1, -1) if row[x])
+        x = first_pixel
+        while x <= last_pixel:
+            if row[x]:
+                run_start = x
+                while x <= last_pixel and row[x]:
+                    x += 1
+                all_runs.append((run_start, x - 1, slot))
+            else:
+                x += 1
+    return all_runs
 
+def _draw_run_at(ctrl, cursor_pos, row_y, run_start, run_end, slot, going_right, simulate):
+    """Navigate to and draw a single run. Direction determined by going_right.
+    Used by snake-based algorithms where traversal direction is consistent."""
+    switch_to_palette_slot(ctrl, slot)
+    if going_right:
+        approach = max(0, run_start - 1)
+        move_to(ctrl, approach, row_y, cursor_pos, simulate=simulate)
+        ctrl.draw_run(ctrl.DPAD_RIGHT, run_end - run_start + 1)
+        cursor_pos[0] = run_end
+    else:
+        approach = min(CANVAS_WIDTH - 1, run_end + 1)
+        move_to(ctrl, approach, row_y, cursor_pos, simulate=simulate)
+        ctrl.draw_run(ctrl.DPAD_LEFT, run_end - run_start + 1)
+        cursor_pos[0] = run_start
+    cursor_pos[1] = row_y
+
+def _draw_run_freeform(ctrl, cursor_pos, run_start, run_end, row_y, slot, simulate):
+    """Navigate to and draw a single run. Direction determined per-run by
+    whichever approach end is closer to the current cursor (Manhattan distance).
+    Used by algorithms where runs can appear in any order across the canvas,
+    such as Morton curve and component routing."""
+    switch_to_palette_slot(ctrl, slot)
+    left_cost  = abs(cursor_pos[0] - (run_start - 1)) + abs(cursor_pos[1] - row_y)
+    right_cost = abs(cursor_pos[0] - (run_end   + 1)) + abs(cursor_pos[1] - row_y)
+    if left_cost <= right_cost:
+        approach = max(0, run_start - 1)
+        move_to(ctrl, approach, row_y, cursor_pos, simulate=simulate)
+        ctrl.draw_run(ctrl.DPAD_RIGHT, run_end - run_start + 1)
+        cursor_pos[0] = run_end
+    else:
+        approach = min(CANVAS_WIDTH - 1, run_end + 1)
+        move_to(ctrl, approach, row_y, cursor_pos, simulate=simulate)
+        ctrl.draw_run(ctrl.DPAD_LEFT, run_end - run_start + 1)
+        cursor_pos[0] = run_start
+    cursor_pos[1] = row_y
+
+def _find_row_bounds(grids):
+    """Return (first_row, last_row) with any pixels across all grids."""
     first_row = None
     last_row  = None
     for _, grid in grids:
@@ -533,29 +587,30 @@ def draw_batch_snake(ctrl, grids, cursor_pos, progress=None, row_task=None, batc
                 if last_row is None or y > last_row:
                     last_row = y
                 break
+    return first_row, last_row
 
+def _update_progress(progress, row_task, all_runs, pixels_painted, batch_pixels):
+    if progress is None:
+        return pixels_painted
+    pixels_in_row = sum(re - rs + 1 for rs, re, _ in all_runs)
+    pixels_painted += pixels_in_row
+    progress.update(row_task, description=f"Pixels: {pixels_painted}/{batch_pixels}")
+    progress.advance(row_task, pixels_in_row)
+    return pixels_painted
+
+# --- Algorithm 1: Interleaved Row Snake (original) ---
+
+def draw_batch_snake(ctrl, grids, cursor_pos, progress=None, row_task=None,
+                     batch_pixels=0, simulate=False):
+    """Row-by-row snake. All colors drawn together per row, sorted by x position."""
+    going_right    = True
+    pixels_painted = 0
+    first_row, last_row = _find_row_bounds(grids)
     if first_row is None:
         return
 
     for row_y in range(first_row, last_row + 1):
-        all_runs = []
-        for slot, grid in grids:
-            row = grid[row_y]
-            if not any(row):
-                continue
-            first_pixel = next(x for x in range(CANVAS_WIDTH) if row[x])
-            last_pixel  = next(x for x in range(CANVAS_WIDTH - 1, -1, -1) if row[x])
-            x = first_pixel
-            while x <= last_pixel:
-                if row[x]:
-                    run_start = x
-                    while x <= last_pixel and row[x]:
-                        x += 1
-                    run_end = x - 1
-                    all_runs.append((run_start, run_end, slot))
-                else:
-                    x += 1
-
+        all_runs = _collect_runs_for_row(grids, row_y)
         if not all_runs:
             if progress:
                 progress.advance(row_task)
@@ -564,29 +619,493 @@ def draw_batch_snake(ctrl, grids, cursor_pos, progress=None, row_task=None, batc
         all_runs.sort(key=lambda r: r[0], reverse=not going_right)
         move_to(ctrl, cursor_pos[0], row_y, cursor_pos, simulate=simulate)
 
+        for run_start, run_end, slot in all_runs:
+            _draw_run_at(ctrl, cursor_pos, row_y, run_start, run_end, slot,
+                         going_right, simulate)
+
+        # Anchor to last drawn position
         if going_right:
-            for run_start, run_end, slot in all_runs:
-                switch_to_palette_slot(ctrl, slot)
-                approach = max(0, run_start - 1)
-                move_to(ctrl, approach, row_y, cursor_pos, simulate=simulate)
-                ctrl.draw_run(ctrl.DPAD_RIGHT, run_end - run_start + 1)
-                cursor_pos[0] = run_end
             move_to(ctrl, all_runs[-1][1], row_y, cursor_pos, simulate=simulate)
         else:
-            for run_start, run_end, slot in all_runs:
-                switch_to_palette_slot(ctrl, slot)
-                approach = min(CANVAS_WIDTH - 1, run_end + 1)
-                move_to(ctrl, approach, row_y, cursor_pos, simulate=simulate)
-                ctrl.draw_run(ctrl.DPAD_LEFT, run_end - run_start + 1)
-                cursor_pos[0] = run_start
             move_to(ctrl, all_runs[-1][0], row_y, cursor_pos, simulate=simulate)
 
-        going_right = not going_right
+        going_right    = not going_right
+        pixels_painted = _update_progress(progress, row_task, all_runs,
+                                          pixels_painted, batch_pixels)
+
+# --- Algorithm 2: Region-Based Snake ---
+
+def draw_batch_region(ctrl, grids, cursor_pos, progress=None, row_task=None,
+                      batch_pixels=0, simulate=False):
+    """Draws each color's contiguous region completely before moving to the next.
+    Better for images where colors are spatially clustered."""
+    pixels_painted = 0
+    first_row, last_row = _find_row_bounds(grids)
+    if first_row is None:
+        return
+
+    # Process one color slot at a time, snake pattern within each
+    for slot, grid in grids:
+        going_right = True
+        for row_y in range(first_row, last_row + 1):
+            row = grid[row_y]
+            if not any(row):
+                continue
+
+            runs = _collect_runs_for_row([(slot, grid)], row_y)
+            if not runs:
+                continue
+
+            runs.sort(key=lambda r: r[0], reverse=not going_right)
+            move_to(ctrl, cursor_pos[0], row_y, cursor_pos, simulate=simulate)
+
+            for run_start, run_end, s in runs:
+                _draw_run_at(ctrl, cursor_pos, row_y, run_start, run_end, s,
+                             going_right, simulate)
+
+            if going_right:
+                move_to(ctrl, runs[-1][1], row_y, cursor_pos, simulate=simulate)
+            else:
+                move_to(ctrl, runs[-1][0], row_y, cursor_pos, simulate=simulate)
+
+            going_right    = not going_right
+            pixels_painted = _update_progress(progress, row_task, runs,
+                                              pixels_painted, batch_pixels)
+
+# --- Algorithm 3: Greedy Nearest-Run Hybrid ---
+
+def draw_batch_greedy(ctrl, grids, cursor_pos, progress=None, row_task=None,
+                      batch_pixels=0, simulate=False):
+    """On each row, greedily picks the nearest undrawn run regardless of color.
+    Minimizes cursor travel for images with many interleaved colors per row."""
+    going_right    = True
+    pixels_painted = 0
+    first_row, last_row = _find_row_bounds(grids)
+    if first_row is None:
+        return
+
+    for row_y in range(first_row, last_row + 1):
+        all_runs = _collect_runs_for_row(grids, row_y)
+        if not all_runs:
+            if progress:
+                progress.advance(row_task)
+            continue
+
+        move_to(ctrl, cursor_pos[0], row_y, cursor_pos, simulate=simulate)
+
+        # Greedily pick nearest run to current cursor position
+        remaining = list(all_runs)
+        drawn_runs = []
+        while remaining:
+            cx = cursor_pos[0]
+            if going_right:
+                # Pick nearest run whose approach (run_start-1) is ahead of cursor
+                ahead = [r for r in remaining if r[0] - 1 >= cx]
+                if ahead:
+                    best = min(ahead, key=lambda r: r[0] - cx)
+                else:
+                    # Nothing ahead — switch direction
+                    going_right = not going_right
+                    best = min(remaining, key=lambda r: abs(r[1] + 1 - cx))
+            else:
+                ahead = [r for r in remaining if r[1] + 1 <= cx]
+                if ahead:
+                    best = min(ahead, key=lambda r: cx - r[1])
+                else:
+                    going_right = not going_right
+                    best = min(remaining, key=lambda r: abs(r[0] - 1 - cx))
+
+            remaining.remove(best)
+            run_start, run_end, slot = best
+            _draw_run_at(ctrl, cursor_pos, row_y, run_start, run_end, slot,
+                         going_right, simulate)
+            drawn_runs.append(best)
+
+        pixels_painted = _update_progress(progress, row_task, drawn_runs,
+                                          pixels_painted, batch_pixels)
+
+# --- Algorithm 4: Run-Length Adaptive ---
+
+# A row is considered "sparse" if its pixel density is below this threshold.
+# Density = total pixels in row / span from first to last pixel.
+# e.g. 5 pixels spread across 200 columns = 5/200 = 0.025 (very sparse)
+#      5 pixels clustered in 5 columns    = 5/5   = 1.0   (dense)
+SPARSE_DENSITY_THRESHOLD = 0.15
+
+def _row_density(all_runs):
+    """Calculate pixel density for a row's runs.
+    Returns (density, total_pixels, span)."""
+    if not all_runs:
+        return 0.0, 0, 0
+    total_pixels = sum(re - rs + 1 for rs, re, _ in all_runs)
+    span = all_runs[-1][1] - all_runs[0][0] + 1
+    return total_pixels / span, total_pixels, span
+
+def _draw_sparse_row(ctrl, cursor_pos, row_y, all_runs, simulate):
+    """Draw a sparse row by pressing A on each individual pixel without
+    using the approach trick. Minimizes travel by just moving pixel by pixel."""
+    # Sort all individual pixels across all runs by x position
+    pixels = []
+    for run_start, run_end, slot in all_runs:
+        for x in range(run_start, run_end + 1):
+            pixels.append((x, slot))
+
+    # Sort by proximity to current cursor rather than strict left-to-right
+    # so we always move in the cheapest direction
+    going_right = cursor_pos[0] <= pixels[len(pixels)//2][0]
+    pixels.sort(key=lambda p: p[0], reverse=not going_right)
+
+    for px, slot in pixels:
+        switch_to_palette_slot(ctrl, slot)
+        move_to(ctrl, px, row_y, cursor_pos, simulate=simulate)
+        # Draw single pixel with A press rather than draw_run
+        ctrl.press(ctrl.BTN_A, hold_ms=ctrl.hold_ms, gap_ms=ctrl.gap_ms)
+
+def draw_batch_adaptive(ctrl, grids, cursor_pos, progress=None, row_task=None,
+                        batch_pixels=0, simulate=False):
+    """Classifies rows as dense or sparse based on pixel density.
+    Dense rows use the greedy nearest approach for efficient run drawing.
+    Sparse rows defer to a separate pass using individual pixel presses
+    to avoid expensive approach travel for tiny isolated runs."""
+    pixels_painted = 0
+    first_row, last_row = _find_row_bounds(grids)
+    if first_row is None:
+        return
+
+    dense_rows  = {}  # row_y -> all_runs
+    sparse_rows = {}  # row_y -> all_runs
+
+    # Classify all rows upfront
+    for row_y in range(first_row, last_row + 1):
+        all_runs = _collect_runs_for_row(grids, row_y)
+        if not all_runs:
+            continue
+        # Sort runs left to right for density calculation
+        all_runs.sort(key=lambda r: r[0])
+        density, total_pixels, span = _row_density(all_runs)
+        if density >= SPARSE_DENSITY_THRESHOLD:
+            dense_rows[row_y] = all_runs
+        else:
+            sparse_rows[row_y] = all_runs
+
+    # --- Pass 1: Draw all dense rows with greedy nearest strategy ---
+    going_right = True
+    for row_y in range(first_row, last_row + 1):
+        if row_y not in dense_rows:
+            continue
+
+        all_runs = dense_rows[row_y]
+        move_to(ctrl, cursor_pos[0], row_y, cursor_pos, simulate=simulate)
+
+        remaining  = list(all_runs)
+        drawn_runs = []
+        while remaining:
+            cx = cursor_pos[0]
+            if going_right:
+                ahead = [r for r in remaining if r[0] - 1 >= cx]
+                if ahead:
+                    best = min(ahead, key=lambda r: r[0] - cx)
+                else:
+                    going_right = not going_right
+                    best = min(remaining, key=lambda r: abs(r[1] + 1 - cx))
+            else:
+                ahead = [r for r in remaining if r[1] + 1 <= cx]
+                if ahead:
+                    best = min(ahead, key=lambda r: cx - r[1])
+                else:
+                    going_right = not going_right
+                    best = min(remaining, key=lambda r: abs(r[0] - 1 - cx))
+
+            remaining.remove(best)
+            run_start, run_end, slot = best
+            _draw_run_at(ctrl, cursor_pos, row_y, run_start, run_end, slot,
+                         going_right, simulate)
+            drawn_runs.append(best)
+
+        going_right    = not going_right
+        pixels_painted = _update_progress(progress, row_task, drawn_runs,
+                                          pixels_painted, batch_pixels)
+
+    # --- Pass 2: Draw all sparse rows with individual pixel presses ---
+    # Sort sparse rows by proximity to current cursor Y to minimize travel
+    sparse_row_list = sorted(sparse_rows.keys(),
+                             key=lambda y: abs(y - cursor_pos[1]))
+
+    for row_y in sparse_row_list:
+        all_runs = sparse_rows[row_y]
+        move_to(ctrl, cursor_pos[0], row_y, cursor_pos, simulate=simulate)
+        _draw_sparse_row(ctrl, cursor_pos, row_y, all_runs, simulate)
+        pixels_painted = _update_progress(progress, row_task, all_runs,
+                                          pixels_painted, batch_pixels)
+
+# --- Algorithm 5: Component-First, Route-Second ---
+
+def _find_connected_components(grid):
+    """Find connected components in a boolean grid using BFS.
+    Returns list of sets of (x,y) pixel coordinates."""
+    visited    = set()
+    components = []
+
+    for y in range(CANVAS_HEIGHT):
+        for x in range(CANVAS_WIDTH):
+            if not grid[y][x] or (x, y) in visited:
+                continue
+            # BFS from this pixel
+            component = set()
+            queue     = [(x, y)]
+            while queue:
+                cx, cy = queue.pop()
+                if (cx, cy) in visited:
+                    continue
+                if cx < 0 or cx >= CANVAS_WIDTH or cy < 0 or cy >= CANVAS_HEIGHT:
+                    continue
+                if not grid[cy][cx]:
+                    continue
+                visited.add((cx, cy))
+                component.add((cx, cy))
+                queue.extend([
+                    (cx+1, cy), (cx-1, cy),
+                    (cx, cy+1), (cx, cy-1),
+                ])
+            if component:
+                components.append(component)
+
+    return components
+
+def _component_centroid(component):
+    """Return average (x,y) of a component's pixels."""
+    xs = [p[0] for p in component]
+    ys = [p[1] for p in component]
+    return sum(xs)/len(xs), sum(ys)/len(ys)
+
+def _draw_component_snake(ctrl, cursor_pos, component, slot, simulate,
+                          progress=None, row_task=None, pixels_painted=0, batch_pixels=0):
+    """Draw a single connected component row by row. Uses row-level snake
+    direction for coherence within each row, but freeform direction per run
+    since components can be approached from any cursor position."""
+    if not component:
+        return pixels_painted
+
+    min_y = min(p[1] for p in component)
+    max_y = max(p[1] for p in component)
+
+    switch_to_palette_slot(ctrl, slot)
+    going_right = True
+
+    for row_y in range(min_y, max_y + 1):
+        row_pixels = sorted([p[0] for p in component if p[1] == row_y])
+        if not row_pixels:
+            continue
+
+        move_to(ctrl, cursor_pos[0], row_y, cursor_pos, simulate=simulate)
+
+        # Build runs from sorted pixels
+        runs = []
+        run_start = row_pixels[0]
+        run_end   = row_pixels[0]
+        for px in row_pixels[1:]:
+            if px == run_end + 1:
+                run_end = px
+            else:
+                runs.append((run_start, run_end))
+                run_start = px
+                run_end   = px
+        runs.append((run_start, run_end))
+
+        if not going_right:
+            runs = list(reversed(runs))
+
+        for rs, re in runs:
+            _draw_run_freeform(ctrl, cursor_pos, rs, re, row_y, slot, simulate)
+
+        # Update progress after each row
+        row_pixels_count = sum(re - rs + 1 for rs, re in runs)
+        pixels_painted += row_pixels_count
         if progress:
-            pixels_in_row = sum(run_end - run_start + 1 for run_start, run_end, slot in all_runs)
-            pixels_painted += pixels_in_row
             progress.update(row_task, description=f"Pixels: {pixels_painted}/{batch_pixels}")
-            progress.advance(row_task, pixels_in_row)
+            progress.advance(row_task, row_pixels_count)
+
+        going_right = not going_right
+
+    return pixels_painted
+
+def draw_batch_component(ctrl, grids, cursor_pos, progress=None, row_task=None,
+                         batch_pixels=0, simulate=False):
+    """Split each color into connected components, order components by cursor
+    proximity, draw each with a local snake. Best for logos, sprites, and images
+    with spatially separated islands of the same color."""
+    pixels_painted = 0
+
+    # Collect all components across all slots
+    all_components = []  # list of (centroid, component_pixels, slot)
+    for slot, grid in grids:
+        components = _find_connected_components(grid)
+        for comp in components:
+            centroid = _component_centroid(comp)
+            all_components.append((centroid, comp, slot))
+
+    if not all_components:
+        return
+
+    # Greedily order components by proximity to current cursor
+    remaining = list(all_components)
+    while remaining:
+        cx, cy = float(cursor_pos[0]), float(cursor_pos[1])
+        best_idx = min(range(len(remaining)),
+                       key=lambda i: (remaining[i][0][0] - cx)**2 +
+                                     (remaining[i][0][1] - cy)**2)
+        centroid, component, slot = remaining.pop(best_idx)
+        pixels_painted = _draw_component_snake(
+            ctrl, cursor_pos, component, slot, simulate,
+            progress=progress, row_task=row_task,
+            pixels_painted=pixels_painted, batch_pixels=batch_pixels
+        )
+
+# --- Algorithm 6: Tiny-Island Pass ---
+
+# Runs with pixel count at or below this are considered "tiny islands"
+TINY_ISLAND_MAX_PIXELS = 3
+
+def draw_batch_tiny_island(ctrl, grids, cursor_pos, progress=None, row_task=None,
+                            batch_pixels=0, simulate=False):
+    """Separates tiny runs (<=TINY_ISLAND_MAX_PIXELS pixels) into a deferred
+    second pass so they don't interrupt the main traversal. The main pass uses
+    greedy nearest for dense runs. Best for dithered art and quantized photos
+    where isolated pixels are scattered throughout."""
+    pixels_painted = 0
+    first_row, last_row = _find_row_bounds(grids)
+    if first_row is None:
+        return
+
+    main_runs_by_row  = {}  # row_y -> [runs]
+    tiny_runs_by_row  = {}  # row_y -> [runs]
+
+    for row_y in range(first_row, last_row + 1):
+        all_runs = _collect_runs_for_row(grids, row_y)
+        if not all_runs:
+            continue
+        main = []
+        tiny = []
+        for rs, re, slot in all_runs:
+            if re - rs + 1 <= TINY_ISLAND_MAX_PIXELS:
+                tiny.append((rs, re, slot))
+            else:
+                main.append((rs, re, slot))
+        if main:
+            main_runs_by_row[row_y] = main
+        if tiny:
+            tiny_runs_by_row[row_y] = tiny
+
+    # --- Pass 1: Main runs using greedy nearest ---
+    going_right = True
+    for row_y in range(first_row, last_row + 1):
+        if row_y not in main_runs_by_row:
+            continue
+
+        all_runs = main_runs_by_row[row_y]
+        move_to(ctrl, cursor_pos[0], row_y, cursor_pos, simulate=simulate)
+
+        remaining  = list(all_runs)
+        drawn_runs = []
+        while remaining:
+            cx = cursor_pos[0]
+            if going_right:
+                ahead = [r for r in remaining if r[0] - 1 >= cx]
+                if ahead:
+                    best = min(ahead, key=lambda r: r[0] - cx)
+                else:
+                    going_right = not going_right
+                    best = min(remaining, key=lambda r: abs(r[1] + 1 - cx))
+            else:
+                ahead = [r for r in remaining if r[1] + 1 <= cx]
+                if ahead:
+                    best = min(ahead, key=lambda r: cx - r[1])
+                else:
+                    going_right = not going_right
+                    best = min(remaining, key=lambda r: abs(r[0] - 1 - cx))
+            remaining.remove(best)
+            rs, re, slot = best
+            _draw_run_at(ctrl, cursor_pos, row_y, rs, re, slot,
+                         going_right, simulate)
+            drawn_runs.append(best)
+
+        going_right    = not going_right
+        pixels_painted = _update_progress(progress, row_task, drawn_runs,
+                                          pixels_painted, batch_pixels)
+
+    # --- Pass 2: Tiny islands sorted by proximity to current cursor ---
+    tiny_rows = sorted(tiny_runs_by_row.keys(),
+                       key=lambda y: abs(y - cursor_pos[1]))
+
+    for row_y in tiny_rows:
+        all_runs = tiny_runs_by_row[row_y]
+        move_to(ctrl, cursor_pos[0], row_y, cursor_pos, simulate=simulate)
+        _draw_sparse_row(ctrl, cursor_pos, row_y, all_runs, simulate)
+        pixels_painted = _update_progress(progress, row_task, all_runs,
+                                          pixels_painted, batch_pixels)
+
+# --- Algorithm 7: Space-Filling Curve (Morton/Z-order) ---
+
+def _morton_encode(x, y):
+    """Encode (x,y) as a Morton code (Z-order curve index).
+    Interleaves the bits of x and y."""
+    def spread_bits(v):
+        v &= 0xFFFF
+        v = (v | (v << 8)) & 0x00FF00FF
+        v = (v | (v << 4)) & 0x0F0F0F0F
+        v = (v | (v << 2)) & 0x33333333
+        v = (v | (v << 1)) & 0x55555555
+        return v
+    return spread_bits(x) | (spread_bits(y) << 1)
+
+def draw_batch_morton(ctrl, grids, cursor_pos, progress=None, row_task=None,
+                      batch_pixels=0, simulate=False):
+    """Traverses pixels along a Morton (Z-order) space-filling curve.
+    Groups adjacent pixels into runs where possible. Best as a general-purpose
+    fallback for dense or noisy images where row/column structure doesn't help,
+    since Morton order maximises spatial locality at every scale."""
+    pixels_painted = 0
+
+    # Collect all pixels across all slots sorted by Morton code
+    all_pixels = []  # (morton_code, x, y, slot)
+    for slot, grid in grids:
+        for y in range(CANVAS_HEIGHT):
+            for x in range(CANVAS_WIDTH):
+                if grid[y][x]:
+                    all_pixels.append((_morton_encode(x, y), x, y, slot))
+
+    if not all_pixels:
+        return
+
+    all_pixels.sort(key=lambda p: p[0])
+
+    # Group consecutive Morton-ordered pixels into horizontal runs
+    # where they happen to be on the same row and adjacent in x
+    runs = []  # (y, x_start, x_end, slot)
+    i = 0
+    while i < len(all_pixels):
+        _, x, y, slot = all_pixels[i]
+        run_start = x
+        run_end   = x
+        j = i + 1
+        # Extend run while same row, same slot, and x is consecutive
+        while (j < len(all_pixels) and
+               all_pixels[j][2] == y and
+               all_pixels[j][3] == slot and
+               all_pixels[j][1] == run_end + 1):
+            run_end = all_pixels[j][1]
+            j += 1
+        runs.append((y, run_start, run_end, slot))
+        i = j
+
+    # Draw runs in Morton order using freeform direction selection
+    for row_y, rs, re, slot in runs:
+        _draw_run_freeform(ctrl, cursor_pos, rs, re, row_y, slot, simulate)
+
+        if progress:
+            pixels_painted += re - rs + 1
+            progress.update(row_task, description=f"Pixels: {pixels_painted}/{batch_pixels}")
+            progress.advance(row_task, re - rs + 1)
 
 # ============================================================
 # Image loading and batch planning
@@ -644,7 +1163,20 @@ def hsv_distance(a, b):
     dv = abs(va - vb)
     return dh**2 + ds**2 + dv**2
 
-def plan_palette_batches(color_pixels):
+def color_centroid(pixels):
+    """Return the average (x, y) position of a color's pixels."""
+    xs = [p[0] for p in pixels]
+    ys = [p[1] for p in pixels]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+def spatial_distance(centroid_a, centroid_b):
+    """Euclidean distance between two canvas centroids."""
+    return ((centroid_a[0] - centroid_b[0])**2 +
+            (centroid_a[1] - centroid_b[1])**2) ** 0.5
+
+def plan_palette_batches_hsv(color_pixels):
+    """Sort colors by HSV proximity — minimizes color picker travel time.
+    Better for images where picker navigation dominates."""
     colors = list(color_pixels.keys())
     if not colors:
         return []
@@ -658,6 +1190,83 @@ def plan_palette_batches(color_pixels):
         if remaining:
             current = min(remaining, key=lambda c: hsv_distance(current, c))
     return [sorted_colors[i:i+PALETTE_SIZE] for i in range(0, len(sorted_colors), PALETTE_SIZE)]
+
+def plan_palette_batches_spatial(color_pixels):
+    """Sort colors by spatial proximity of their pixel centroids — minimizes
+    cursor travel between palette switches during drawing.
+    Better for images where colors are spatially clustered (real-world photos,
+    pixel art with distinct regions)."""
+    colors = list(color_pixels.keys())
+    if not colors:
+        return []
+
+    # Compute centroid for each color
+    centroids = {c: color_centroid(color_pixels[c]) for c in colors}
+
+    # Nearest-neighbor sort starting from top-left corner (0,0)
+    remaining     = colors.copy()
+    current_pos   = (0.0, 0.0)
+    sorted_colors = []
+
+    while remaining:
+        # Pick color whose centroid is nearest to current position
+        current = min(remaining,
+                      key=lambda c: spatial_distance(centroids[c], current_pos))
+        sorted_colors.append(current)
+        remaining.remove(current)
+        current_pos = centroids[current]
+
+    return [sorted_colors[i:i+PALETTE_SIZE] for i in range(0, len(sorted_colors), PALETTE_SIZE)]
+
+def plan_palette_batches_intra(color_pixels):
+    """HSV sort across batches to minimise picker travel, then within each batch
+    reorder colors by spatial centroid proximity to minimise cursor travel
+    during the drawing pass. Hybrid approach that tries to get the best of both."""
+    colors = list(color_pixels.keys())
+    if not colors:
+        return []
+
+    # Step 1: HSV nearest-neighbor sort to form batches
+    remaining = colors.copy()
+    current   = min(remaining,
+                    key=lambda c: colorsys.rgb_to_hsv(c[0]/255, c[1]/255, c[2]/255)[2])
+    sorted_colors = []
+    while remaining:
+        sorted_colors.append(current)
+        remaining.remove(current)
+        if remaining:
+            current = min(remaining, key=lambda c: hsv_distance(current, c))
+    batches = [sorted_colors[i:i+PALETTE_SIZE]
+               for i in range(0, len(sorted_colors), PALETTE_SIZE)]
+
+    # Step 2: Within each batch, reorder by spatial centroid proximity
+    centroids = {c: color_centroid(color_pixels[c]) for c in colors}
+    reordered_batches = []
+    for batch in batches:
+        if len(batch) <= 1:
+            reordered_batches.append(batch)
+            continue
+        # Nearest-neighbor sort within the batch starting from top-left
+        remaining_in_batch = batch.copy()
+        current_pos        = (0.0, 0.0)
+        sorted_batch       = []
+        while remaining_in_batch:
+            nearest = min(remaining_in_batch,
+                          key=lambda c: spatial_distance(centroids[c], current_pos))
+            sorted_batch.append(nearest)
+            remaining_in_batch.remove(nearest)
+            current_pos = centroids[nearest]
+        reordered_batches.append(sorted_batch)
+
+    return reordered_batches
+
+def plan_palette_batches(color_pixels):
+    """Returns all batch plans for simulation to compare."""
+    return {
+        "hsv":     plan_palette_batches_hsv(color_pixels),
+        "spatial": plan_palette_batches_spatial(color_pixels),
+        "intra":   plan_palette_batches_intra(color_pixels),
+    }
 
 def build_color_grid(color_pixels, color):
     grid = [[False] * CANVAS_WIDTH for _ in range(CANVAS_HEIGHT)]
@@ -741,56 +1350,88 @@ class MockController(Controller):
 
 
 
-def calculate_time_estimate(color_pixels, batches, hold_ms=35, gap_ms=35):
-    """Calculate time estimate by simulating the full draw process."""
+def calculate_time_estimate(color_pixels, batch_plans, hold_ms=35, gap_ms=35):
+    """Simulate all combinations of batch plan and drawing algorithm.
+    Returns the fastest combination."""
     global current_tab, palette_state, slot_picker_state
-    
-    ctrl = MockController("2wicc", hold_ms=hold_ms, gap_ms=gap_ms)
-    # Simulate the drawing without showing progress and with simulate mode enabled
-    draw_image(ctrl, color_pixels, batches, show_progress=False, simulate=True)
-    elapsed_min = ctrl.elapsed_ms / 1000 / 60
-    
-    total_pixels = sum(len(v) for v in color_pixels.values())
-    total_colors = len(color_pixels)
-    slots_to_fill = sum(len(batch) for batch in batches)
-    
-    # Convert phase times from ms to seconds and minutes
-    phase_breakdown = {}
-    for phase_name, ms in ctrl.phase_times.items():
-        seconds = ms / 1000
-        phase_breakdown[phase_name] = seconds
-    
-    # Reset global state after simulation
-    current_tab = "palette"
-    palette_state = {
-        "slots":       list(DEFAULT_SIDEBAR),
-        "active_slot": 0
-    }
-    slot_picker_state = [
-        {
-            "hue_pos":     0,
-            "sat_pos":     0,
-            "val_pos":     111,
-            "palette_row": PALETTE_COLORS[DEFAULT_SIDEBAR[slot]][0],
-            "palette_col": PALETTE_COLORS[DEFAULT_SIDEBAR[slot]][1],
-        }
-        for slot in range(PALETTE_SIZE)
+
+    draw_algorithms = [
+        ("Interleaved Snake",    draw_batch_snake),
+        ("Region Snake",         draw_batch_region),
+        ("Greedy Nearest",       draw_batch_greedy),
+        ("Run-Length Adaptive",  draw_batch_adaptive),
+        ("Component Route",      draw_batch_component),
+        ("Tiny Island Pass",     draw_batch_tiny_island),
+        ("Morton Curve",         draw_batch_morton),
     ]
-    
+
+    batch_plan_names = {
+        "hsv":     "HSV Sort",
+        "spatial": "Spatial Sort",
+        "intra":   "Intra-Batch Sort",
+    }
+
+    best_name     = None
+    best_fn       = None
+    best_batches  = None
+    best_ms       = None
+    best_phases   = None
+
+    for plan_key, batches in batch_plans.items():
+        for algo_name, algo_fn in draw_algorithms:
+            ctrl = MockController("swicc", hold_ms=hold_ms, gap_ms=gap_ms)
+            draw_image(ctrl, color_pixels, batches,
+                       show_progress=False, simulate=True, draw_fn=algo_fn)
+
+            elapsed = ctrl.elapsed_ms
+            combo_name = f"{batch_plan_names[plan_key]} + {algo_name}"
+
+            if best_ms is None or elapsed < best_ms:
+                best_ms      = elapsed
+                best_name    = combo_name
+                best_fn      = algo_fn
+                best_batches = batches
+                best_phases  = dict(ctrl.phase_times)
+
+            # Reset global state between simulations
+            current_tab = "palette"
+            palette_state = {
+                "slots":       list(DEFAULT_SIDEBAR),
+                "active_slot": 0
+            }
+            slot_picker_state = [
+                {
+                    "hue_pos":     0,
+                    "sat_pos":     0,
+                    "val_pos":     111,
+                    "palette_row": PALETTE_COLORS[DEFAULT_SIDEBAR[slot]][0],
+                    "palette_col": PALETTE_COLORS[DEFAULT_SIDEBAR[slot]][1],
+                }
+                for slot in range(PALETTE_SIZE)
+            ]
+
+    total_pixels  = sum(len(v) for v in color_pixels.values())
+    total_colors  = len(color_pixels)
+    slots_to_fill = sum(len(batch) for batch in best_batches)
+    phase_breakdown = {k: v / 1000 for k, v in best_phases.items()}
+
     return {
-        "total_min": elapsed_min,
-        "slots": slots_to_fill,
-        "colors": total_colors,
-        "pixels": total_pixels,
-        "batches": len(batches),
+        "total_min":       best_ms / 1000 / 60,
+        "slots":           slots_to_fill,
+        "colors":          total_colors,
+        "pixels":          total_pixels,
+        "batches":         len(best_batches),
         "phase_breakdown": phase_breakdown,
+        "algorithm_name":  best_name,
+        "algorithm_fn":    best_fn,
+        "best_batches":    best_batches,
     }
 
 def print_estimate(est):
     table = Table(title="  Time Estimate Breakdown", show_header=False, box=None, padding=(0, 2))
     table.add_column("Phase", style="cyan")
     table.add_column("Time", justify="right")
-    
+
     phase_breakdown = est.get("phase_breakdown", {})
     if phase_breakdown:
         for phase_name, seconds in phase_breakdown.items():
@@ -800,9 +1441,11 @@ def print_estimate(est):
             else:
                 table.add_row(phase_name, f"{seconds:.1f}s")
         table.add_row("", "")
-    
-    table.add_row(f"[bold]Total[/bold]",
+
+    table.add_row("[bold]Total[/bold]",
                   f"[bold]{est['total_min']:.1f} min[/bold]")
+    table.add_row("[dim]Algorithm[/dim]",
+                  f"[dim]{est.get('algorithm_name', 'Unknown')}[/dim]")
     console.print(table)
 
 # ============================================================
@@ -848,9 +1491,14 @@ def startup(ctrl, simulate=False):
 # Main drawing loop
 # ============================================================
 
-def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True, simulate=False):
-    cursor_pos  = [128, 128]
-    start_time  = datetime.now()
+def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
+               simulate=False, draw_fn=None):
+    """Main drawing loop. draw_fn selects which algorithm to use."""
+    if draw_fn is None:
+        draw_fn = draw_batch_snake  # default fallback
+
+    cursor_pos = [128, 128]
+    start_time = datetime.now()
 
     if simulate and isinstance(ctrl, MockController):
         ctrl.start_phase("Initialization")
@@ -923,7 +1571,7 @@ def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True, simula
                 progress.update(batch_task,
                     description=f"[bold]Batch {batch_num+1}/{len(batches)}[/bold] — drawing")
 
-            draw_batch_snake(ctrl, grids, cursor_pos, progress_context, row_task, batch_pixels, simulate=simulate)
+            draw_fn(ctrl, grids, cursor_pos, progress_context, row_task, batch_pixels, simulate=simulate)
             
             if progress_context:
                 progress.advance(batch_task)
@@ -990,9 +1638,12 @@ def main():
         console.print(f"Timing: [cyan]{args.timing}ms[/cyan]")
 
     color_pixels, img = load_image(args.image, quantize_colors=args.quantize)
-    batches = plan_palette_batches(color_pixels)
-    est     = calculate_time_estimate(color_pixels, batches,
+    batch_plans = plan_palette_batches(color_pixels)
+
+    console.print("Simulating drawing strategies, please wait...")
+    est     = calculate_time_estimate(color_pixels, batch_plans,
                                       hold_ms=args.timing, gap_ms=args.timing)
+    batches = est["best_batches"]
 
     console.print(f"\nColors: [cyan]{est['colors']}[/cyan]  "
                   f"Pixels: [cyan]{est['pixels']}[/cyan]  "
@@ -1052,7 +1703,7 @@ def main():
     console.print()
     console.input("Hover over [bold]'Add Face Paint'[/bold] in-game, then press [bold]Enter[/bold]: ")
 
-    draw_image(ctrl, color_pixels, batches, est)
+    draw_image(ctrl, color_pixels, batches, est, draw_fn=est.get("algorithm_fn"))
 
     ser.close()
 
