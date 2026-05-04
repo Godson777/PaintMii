@@ -601,7 +601,7 @@ def _update_progress(progress, row_task, all_runs, pixels_painted, batch_pixels)
 # --- Algorithm 1: Interleaved Row Snake (original) ---
 
 def draw_batch_snake(ctrl, grids, cursor_pos, progress=None, row_task=None,
-                     batch_pixels=0, simulate=False):
+                     batch_pixels=0, simulate=False, component_cache=None, batch_colors=None):
     """Row-by-row snake. All colors drawn together per row, sorted by x position."""
     going_right    = True
     pixels_painted = 0
@@ -636,7 +636,7 @@ def draw_batch_snake(ctrl, grids, cursor_pos, progress=None, row_task=None,
 # --- Algorithm 2: Region-Based Snake ---
 
 def draw_batch_region(ctrl, grids, cursor_pos, progress=None, row_task=None,
-                      batch_pixels=0, simulate=False):
+                      batch_pixels=0, simulate=False, component_cache=None, batch_colors=None):
     """Draws each color's contiguous region completely before moving to the next.
     Better for images where colors are spatially clustered."""
     pixels_painted = 0
@@ -675,7 +675,7 @@ def draw_batch_region(ctrl, grids, cursor_pos, progress=None, row_task=None,
 # --- Algorithm 3: Greedy Nearest-Run Hybrid ---
 
 def draw_batch_greedy(ctrl, grids, cursor_pos, progress=None, row_task=None,
-                      batch_pixels=0, simulate=False):
+                      batch_pixels=0, simulate=False, component_cache=None, batch_colors=None):
     """On each row, greedily picks the nearest undrawn run regardless of color.
     Minimizes cursor travel for images with many interleaved colors per row."""
     going_right    = True
@@ -762,7 +762,7 @@ def _draw_sparse_row(ctrl, cursor_pos, row_y, all_runs, simulate):
         ctrl.press(ctrl.BTN_A, hold_ms=ctrl.hold_ms, gap_ms=ctrl.gap_ms)
 
 def draw_batch_adaptive(ctrl, grids, cursor_pos, progress=None, row_task=None,
-                        batch_pixels=0, simulate=False):
+                        batch_pixels=0, simulate=False, component_cache=None, batch_colors=None):
     """Classifies rows as dense or sparse based on pixel density.
     Dense rows use the greedy nearest approach for efficient run drawing.
     Sparse rows defer to a separate pass using individual pixel presses
@@ -930,16 +930,21 @@ def _draw_component_snake(ctrl, cursor_pos, component, slot, simulate,
     return pixels_painted
 
 def draw_batch_component(ctrl, grids, cursor_pos, progress=None, row_task=None,
-                         batch_pixels=0, simulate=False):
-    """Split each color into connected components, order components by cursor
-    proximity, draw each with a local snake. Best for logos, sprites, and images
-    with spatially separated islands of the same color."""
+                         batch_pixels=0, simulate=False, component_cache=None, batch_colors=None):
+    """Split each color into connected components, order components by spatial
+    proximity using bucket sort, draw each with a local snake. Best for logos,
+    sprites, and images with spatially separated islands of the same color."""
     pixels_painted = 0
 
-    # Collect all components across all slots
-    all_components = []  # list of (centroid, component_pixels, slot)
+    # Collect all components. Use cache keyed by color if available,
+    # otherwise compute via BFS.
+    all_components = []
     for slot, grid in grids:
-        components = _find_connected_components(grid)
+        color = batch_colors[slot] if batch_colors is not None else None
+        if component_cache is not None and color is not None and color in component_cache:
+            components = component_cache[color]
+        else:
+            components = _find_connected_components(grid)
         for comp in components:
             centroid = _component_centroid(comp)
             all_components.append((centroid, comp, slot))
@@ -947,14 +952,27 @@ def draw_batch_component(ctrl, grids, cursor_pos, progress=None, row_task=None,
     if not all_components:
         return
 
-    # Greedily order components by proximity to current cursor
-    remaining = list(all_components)
-    while remaining:
-        cx, cy = float(cursor_pos[0]), float(cursor_pos[1])
-        best_idx = min(range(len(remaining)),
-                       key=lambda i: (remaining[i][0][0] - cx)**2 +
-                                     (remaining[i][0][1] - cy)**2)
-        centroid, component, slot = remaining.pop(best_idx)
+    # Order components by spatial proximity using bucket sort (O(N) vs O(N^2) greedy).
+    # Divide canvas into BUCKET_GRID x BUCKET_GRID cells, snake through cells.
+    BUCKET_GRID  = 16
+    BUCKET_SIZE  = CANVAS_WIDTH // BUCKET_GRID  # 16px per bucket
+    buckets      = {}
+    for centroid, comp, slot in all_components:
+        bx  = min(int(centroid[0] // BUCKET_SIZE), BUCKET_GRID - 1)
+        by  = min(int(centroid[1] // BUCKET_SIZE), BUCKET_GRID - 1)
+        key = (by, bx)
+        if key not in buckets:
+            buckets[key] = []
+        buckets[key].append((centroid, comp, slot))
+
+    ordered = []
+    for by in range(BUCKET_GRID):
+        row = range(BUCKET_GRID) if by % 2 == 0 else range(BUCKET_GRID - 1, -1, -1)
+        for bx in row:
+            if (by, bx) in buckets:
+                ordered.extend(buckets[(by, bx)])
+
+    for centroid, component, slot in ordered:
         pixels_painted = _draw_component_snake(
             ctrl, cursor_pos, component, slot, simulate,
             progress=progress, row_task=row_task,
@@ -967,7 +985,7 @@ def draw_batch_component(ctrl, grids, cursor_pos, progress=None, row_task=None,
 TINY_ISLAND_MAX_PIXELS = 3
 
 def draw_batch_tiny_island(ctrl, grids, cursor_pos, progress=None, row_task=None,
-                            batch_pixels=0, simulate=False):
+                            batch_pixels=0, simulate=False, component_cache=None, batch_colors=None):
     """Separates tiny runs (<=TINY_ISLAND_MAX_PIXELS pixels) into a deferred
     second pass so they don't interrupt the main traversal. The main pass uses
     greedy nearest for dense runs. Best for dithered art and quantized photos
@@ -1059,7 +1077,7 @@ def _morton_encode(x, y):
     return spread_bits(x) | (spread_bits(y) << 1)
 
 def draw_batch_morton(ctrl, grids, cursor_pos, progress=None, row_task=None,
-                      batch_pixels=0, simulate=False):
+                      batch_pixels=0, simulate=False, component_cache=None, batch_colors=None):
     """Traverses pixels along a Morton (Z-order) space-filling curve.
     Groups adjacent pixels into runs where possible. Best as a general-purpose
     fallback for dense or noisy images where row/column structure doesn't help,
@@ -1355,6 +1373,13 @@ def calculate_time_estimate(color_pixels, batch_plans, hold_ms=35, gap_ms=35):
     Returns the fastest combination."""
     global current_tab, palette_state, slot_picker_state
 
+    # Precompute connected components for every color once, reused across
+    # all 21 simulation combinations. Keyed by color tuple.
+    color_component_cache = {}
+    for color in color_pixels:
+        grid = build_color_grid(color_pixels, color)
+        color_component_cache[color] = _find_connected_components(grid)
+
     draw_algorithms = [
         ("Interleaved Snake",    draw_batch_snake),
         ("Region Snake",         draw_batch_region),
@@ -1381,7 +1406,8 @@ def calculate_time_estimate(color_pixels, batch_plans, hold_ms=35, gap_ms=35):
         for algo_name, algo_fn in draw_algorithms:
             ctrl = MockController("swicc", hold_ms=hold_ms, gap_ms=gap_ms)
             draw_image(ctrl, color_pixels, batches,
-                       show_progress=False, simulate=True, draw_fn=algo_fn)
+                       show_progress=False, simulate=True, draw_fn=algo_fn,
+                       component_cache=color_component_cache)
 
             elapsed = ctrl.elapsed_ms
             combo_name = f"{batch_plan_names[plan_key]} + {algo_name}"
@@ -1492,7 +1518,7 @@ def startup(ctrl, simulate=False):
 # ============================================================
 
 def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
-               simulate=False, draw_fn=None):
+               simulate=False, draw_fn=None, component_cache=None):
     """Main drawing loop. draw_fn selects which algorithm to use."""
     if draw_fn is None:
         draw_fn = draw_batch_snake  # default fallback
@@ -1557,7 +1583,7 @@ def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
 
             # Calculate total pixels in this batch
             batch_pixels = sum(len(color_pixels[color]) for color in batch)
-            
+
             # Build grids
             grids = [(slot, build_color_grid(color_pixels, color))
                      for slot, color in enumerate(batch)]
@@ -1571,7 +1597,9 @@ def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
                 progress.update(batch_task,
                     description=f"[bold]Batch {batch_num+1}/{len(batches)}[/bold] — drawing")
 
-            draw_fn(ctrl, grids, cursor_pos, progress_context, row_task, batch_pixels, simulate=simulate)
+            draw_fn(ctrl, grids, cursor_pos, progress_context, row_task, batch_pixels,
+                    simulate=simulate, component_cache=component_cache,
+                    batch_colors=batch)
             
             if progress_context:
                 progress.advance(batch_task)
