@@ -1132,12 +1132,61 @@ def draw_batch_morton(ctrl, grids, cursor_pos, progress=None, row_task=None,
 def quantize_image(img, max_colors):
     alpha     = img.split()[3]
     rgb       = img.convert("RGB")
-    quantized = rgb.quantize(colors=max_colors, method=Image.Quantize.MEDIANCUT)
+    # FLOYDSTEINBERG dithering preserves gradients better than flat quantization
+    quantized = rgb.quantize(colors=max_colors, method=Image.Quantize.MEDIANCUT,
+                             dither=Image.Dither.FLOYDSTEINBERG)
     result    = quantized.convert("RGBA")
     result.putalpha(alpha)
     return result
 
-def load_image(path, quantize_colors=None):
+def snap_to_palette(img, max_colors=None):
+    """Remap every pixel to the game's 84 built-in palette colors using
+    Floyd-Steinberg dithering to preserve gradients and smooth transitions.
+    If max_colors is given, first find the N palette colors that best represent
+    the image, then dither into only those N colors."""
+    alpha          = img.split()[3]
+    rgb            = img.convert("RGB")
+    palette_colors = list(PALETTE_COLORS.keys())
+
+    if max_colors is not None:
+        # Step 1: quantize to N colors to find the best N representatives
+        pre = rgb.quantize(colors=max_colors, method=Image.Quantize.MEDIANCUT,
+                           dither=Image.Dither.NONE).convert("RGB")
+
+        # Step 2: map each representative to its nearest palette color
+        chosen = set()
+        for y in range(pre.height):
+            for x in range(pre.width):
+                r, g, b = pre.getpixel((x, y))
+                nearest = min(palette_colors,
+                              key=lambda c: (c[0]-r)**2 + (c[1]-g)**2 + (c[2]-b)**2)
+                chosen.add(nearest)
+                if len(chosen) == max_colors:
+                    break
+            if len(chosen) == max_colors:
+                break
+
+        # Use only the chosen subset for dithering
+        active_palette = list(chosen)
+    else:
+        active_palette = palette_colors
+
+    # Build a PIL palette image from the active color set
+    pal_img = Image.new("P", (1, 1))
+    flat    = []
+    for r, g, b in active_palette:
+        flat.extend([r, g, b])
+    # Pad remainder with black
+    flat.extend([0, 0, 0] * (256 - len(active_palette)))
+    pal_img.putpalette(flat)
+
+    # Dither into the restricted palette
+    snapped = rgb.quantize(palette=pal_img, dither=Image.Dither.FLOYDSTEINBERG)
+    result  = snapped.convert("RGBA")
+    result.putalpha(alpha)
+    return result
+
+def load_image(path, quantize_colors=None, snap=False, snap_colors=None):
     try:
         img = Image.open(path).convert("RGBA")
     except FileNotFoundError:
@@ -1153,9 +1202,10 @@ def load_image(path, quantize_colors=None):
         sys.exit(1)
 
     if quantize_colors is not None:
-        console.print(f"[cyan]Quantizing to {quantize_colors} colors...[/cyan]")
         img = quantize_image(img, quantize_colors)
-        console.print("[green]Done.[/green]")
+
+    if snap:
+        img = snap_to_palette(img, max_colors=snap_colors)
 
     color_pixels = {}
     for y in range(img.height):
@@ -1635,6 +1685,8 @@ def parse_args():
 Examples:
   python PaintMii.py art.png
   python PaintMii.py art.png --quantize 32
+  python PaintMii.py art.png --snap
+  python PaintMii.py art.png --snap 32
   python PaintMii.py art.png --timing 40
   python PaintMii.py art.png --dry-run
         """
@@ -1644,7 +1696,10 @@ Examples:
     parser.add_argument("--timing", type=int, default=35, metavar="MS",
         help="Hold/gap timing in milliseconds (default: 35)")
     parser.add_argument("--quantize", type=int, metavar="N",
-        help="Quantize image to N colors (1-100) before drawing")
+        help="Quantize image to N colors (1-100) with dithering before drawing")
+    parser.add_argument("--snap", nargs="?", const=True, metavar="N",
+        help="Snap colors to the game's 84-color palette with dithering. "
+             "Optionally limit to N palette colors (e.g. --snap 32)")
     parser.add_argument("--dry-run", action="store_true",
         help="Show time estimate without connecting to the device")
     return parser.parse_args()
@@ -1658,14 +1713,38 @@ def main():
         console.print("[bold red]Error:[/bold red] --quantize must be between 1 and 100.")
         sys.exit(1)
 
+    # Parse --snap: may be True (no value), an int string, or None
+    snap        = args.snap is not None
+    snap_colors = None
+    if snap and args.snap is not True:
+        try:
+            snap_colors = int(args.snap)
+            if not (1 <= snap_colors <= 84):
+                raise ValueError
+        except ValueError:
+            console.print("[bold red]Error:[/bold red] --snap N must be a number between 1 and 84.")
+            sys.exit(1)
+
     console.rule("[bold]Tomodachi Life Auto Painter[/bold]")
     console.print(f"Image:  [cyan]{args.image}[/cyan]")
-    if args.quantize:
-        console.print(f"Quantize to [cyan]{args.quantize}[/cyan] colors")
     if args.timing != 35:
         console.print(f"Timing: [cyan]{args.timing}ms[/cyan]")
 
-    color_pixels, img = load_image(args.image, quantize_colors=args.quantize)
+    if args.quantize:
+        console.print(f"Quantizing to [cyan]{args.quantize}[/cyan] colors...")
+    if snap:
+        if snap_colors:
+            console.print(f"Snapping to game palette (max [cyan]{snap_colors}[/cyan] colors)...")
+        else:
+            console.print("Snapping to [cyan]game palette (up to 84 colors)[/cyan]...")
+
+    color_pixels, img = load_image(args.image,
+                                   quantize_colors=args.quantize,
+                                   snap=snap,
+                                   snap_colors=snap_colors)
+
+    if args.quantize or snap:
+        console.print(f"[green]Done.[/green] {len(color_pixels)} colors.")
     batch_plans = plan_palette_batches(color_pixels)
 
     console.print("Simulating drawing strategies, please wait...")
@@ -1685,7 +1764,8 @@ def main():
     if est["colors"] > 100:
         console.print(f"\n[bold yellow]Warning:[/bold yellow] {est['colors']} unique colors — "
                       f"estimated [bold]{est['total_min']:.0f}+ minutes[/bold].")
-        console.print("   Consider [bold]--quantize 64[/bold] to speed things up.")
+        console.print("   Consider [bold]--quantize 64[/bold] to reduce colors, or")
+        console.print("   [bold]--snap 32[/bold] to map to the game's built-in palette.")
         if console.input("Continue anyway? [y/N]: ").strip().lower() != 'y':
             console.print("Aborted.")
             return
