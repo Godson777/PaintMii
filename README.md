@@ -13,39 +13,30 @@ Automates drawing images in "Tomodachi Life: Living the Dream" using a [SwiCC](h
 > [!WARNING]
 > **There are a couple of limitations with PaintMii:**
 > 1. Tomodachi Life runs at 30FPS; as such, the game can only receive inputs so fast. Currently, PaintMii presses and releases buttons at roughly 35ms, which is slightly slower than the time it takes to render a single frame at 30FPS (roughly 33ms). Because of this, images may take a while to recreate. [For example: the crunch bar I showcased with a earlier build of PaintMii took roughly 2+ hours.](https://x.com/GodsonTM_/status/2046443974798287077?s=20) ***There is no way to send controller inputs faster than this.***
-> 2. Due to using the D-Pad for all of its inputs, it is impossible to be super accurate with the color range. If it were possible to get consistent results by sending left stick inputs, then it *could* be possible to reach full color accuracy. This would need further testing, and honestly, attempting this is rather low on my priority list at the moment.
-
+> 2. Due to using the D-Pad for all of its inputs, it is impossible to be 100% accurate with the color range. It's *theoretically* possible to send left stick inputs to reach 100% color accuracy but I feel it's unneccessary to pursue it. As it stands, PaintMii is already able to get *very* close to a target color to the point that it's hardly noticable.
 
 ## Requirements
 
-- Python 3.x
 - A [SwiCC](https://github.com/knflrpn/SwiCC_RP2040) or [2wiCC](https://github.com/knflrpn/2wiCC) device connected to your Nintendo Switch
 - A Nintendo Switch with "Tomodachi Life: Living the Dream" installed
 
-### Python Dependencies
-
-```bash
-pip install pyserial pillow rich
-```
-
 ## Installation
 
-1. Clone or download this repository
-2. Install the required Python dependencies (see Requirements section)
-3. Connect your SwiCC/2wiCC device to your computer
+1. Download the executable for your OS in the [releases page](https://github.com/Godson777/PaintMii/releases)
+2. Connect your SwiCC/2wiCC device to your computer
 
 ## Usage
 
 ### Basic Usage
 
 ```bash
-python PaintMii.py <image.png>
+PaintMii <image.png>
 ```
 
 ### Advanced Options
 
 ```bash
-python PaintMii.py <image.png> [options]
+PaintMii <image.png> [options]
 ```
 
 **Options:**
@@ -60,16 +51,16 @@ python PaintMii.py <image.png> [options]
 
 ```bash
 # Paint an image with default settings
-python PaintMii.py myimage.png
+PaintMii myimage.png
 
 # Paint with 16 colors
-python PaintMii.py myimage.png --quantize 16
+PaintMii myimage.png --quantize 16
 
 # Preview before painting (dry run)
-python PaintMii.py myimage.png --dry-run
+PaintMii myimage.png --dry-run
 
 # Slower painting speed (50ms timing)
-python PaintMii.py myimage.png --timing 50
+PaintMii myimage.png --timing 50
 ```
 
 ## Supported Image Formats
