@@ -1679,7 +1679,7 @@ def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Tomodachi Life Auto Painter",
+        description="PaintMii",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1725,7 +1725,7 @@ def main():
             console.print("[bold red]Error:[/bold red] --snap N must be a number between 1 and 84.")
             sys.exit(1)
 
-    console.rule("[bold]Tomodachi Life Auto Painter[/bold]")
+    console.rule("[bold]PaintMii[/bold]")
     console.print(f"Image:  [cyan]{args.image}[/cyan]")
     if args.timing != 35:
         console.print(f"Timing: [cyan]{args.timing}ms[/cyan]")
