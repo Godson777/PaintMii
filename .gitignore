@@ -2,3 +2,4 @@ __pycache__/
 backup/
 test images/
 test tools/
+*.png
