@@ -7,11 +7,16 @@ Requirements:
 
 Usage:
     python PaintMii.py <image.png> [options]
+    python PaintMii.py --test-connection
 
 Options:
     --timing MS         Hold/gap timing in ms (default: 35)
-    --quantize N        Quantize image to N colors before drawing (1-100)
+    --quantize N        Quantize image to N colors before drawing (1-32, uses dithering by default)
+    --snap [N]          Snap to game's palette colors (optionally limit to N colors, uses dithering by default)
+    --no-dither         Disable dithering for flat colors (use with --quantize or --snap)
+    --preview FILE      Save a preview of the processed image to FILE
     --dry-run           Show estimate without connecting to device
+    --test-connection   Test device connection and exit (no image required)
 """
 
 import argparse
@@ -34,16 +39,27 @@ console = Console()
 # Device detection
 # ============================================================
 
+# Raspberry Pi Pico (used in some SwiCC/2wiCC builds)
 SWICC_VID      = 0x2E8A
 SWICC_PIDS     = [0x000A, 0x0005]
-SWICC_KEYWORDS = ['swicc', 'pico', 'raspberry pi']
+
+# Silicon Labs CP210x (common USB-to-UART bridge used in SwiCC devices)
+CP210X_VID     = 0x10C4
+CP210X_PIDS    = [0xEA60]
+
+SWICC_KEYWORDS = ['swicc', 'pico', 'raspberry pi', 'cp210x']
 
 def find_controller_port():
     """Scan serial ports for a SwiCC or 2wiCC device. Returns (port, device_type) or (None, None)."""
     ports = serial.tools.list_ports.comports()
     for port in ports:
+        # Check for Raspberry Pi Pico
         if port.vid == SWICC_VID and port.pid in SWICC_PIDS:
             return port.device, "auto"
+        # Check for CP210x USB-to-UART bridge (common in SwiCC)
+        if port.vid == CP210X_VID and port.pid in CP210X_PIDS:
+            return port.device, "auto"
+        # Check for keyword matches
         desc = (port.description or '').lower()
         mfr  = (port.manufacturer or '').lower()
         if any(kw in desc or kw in mfr for kw in SWICC_KEYWORDS):
@@ -73,14 +89,16 @@ class Controller:
     Abstracts SwiCC and 2wiCC differences behind a common interface.
     """
 
-    BTN_Y  = 0x01
-    BTN_B  = 0x02
-    BTN_A  = 0x04
-    BTN_X  = 0x08
-    BTN_L  = 0x10
-    BTN_R  = 0x20
-    BTN_ZL = 0x40
-    BTN_ZR = 0x80
+    BTN_Y     = 0x01
+    BTN_B     = 0x02
+    BTN_A     = 0x04
+    BTN_X     = 0x08
+    BTN_L     = 0x10
+    BTN_R     = 0x20
+    BTN_ZL    = 0x40
+    BTN_ZR    = 0x80
+    BTN_MINUS = 0x100
+    BTN_PLUS  = 0x200
 
     DPAD_UP         = 0
     DPAD_UP_RIGHT   = 1
@@ -106,7 +124,10 @@ class Controller:
             self._send_2wicc(buttons, dpad)
 
     def _send_swicc(self, buttons, dpad):
-        state = f"00{buttons:02X}{dpad:02X}"
+        # Split buttons into high byte (PLUS/MINUS) and low byte (Y/B/A/X/L/R/ZL/ZR)
+        b1 = (buttons >> 8) & 0xFF  # High byte: BTN_MINUS (bit 8), BTN_PLUS (bit 9)
+        b2 = buttons & 0xFF          # Low byte: BTN_Y through BTN_ZR (bits 0-7)
+        state = f"{b1:02X}{b2:02X}{dpad:02X}"
         self.ser.write(f"+IMM {state}\n".encode())
 
     def _send_2wicc(self, buttons, dpad):
@@ -119,6 +140,8 @@ class Controller:
         if buttons & self.BTN_A:  b1 |= 0x08
         if buttons & self.BTN_R:  b1 |= 0x40
         if buttons & self.BTN_ZR: b1 |= 0x80
+        if buttons & self.BTN_MINUS: b2 |= 0x01
+        if buttons & self.BTN_PLUS:  b2 |= 0x02
         if buttons & self.BTN_L:  b3 |= 0x40
         if buttons & self.BTN_ZL: b3 |= 0x80
         dpad_map = {
@@ -210,7 +233,8 @@ signal.signal(signal.SIGINT, _signal_handler)
 # Canvas navigation
 # ============================================================
 
-CANVAS_WIDTH  = 256
+# Canvas dimensions
+CANVAS_WIDTH = 256
 CANVAS_HEIGHT = 256
 
 def move_to(ctrl, target_x, target_y, cursor_pos, simulate=False):
@@ -1129,21 +1153,22 @@ def draw_batch_morton(ctrl, grids, cursor_pos, progress=None, row_task=None,
 # Image loading and batch planning
 # ============================================================
 
-def quantize_image(img, max_colors):
+def quantize_image(img, max_colors, use_dither=True):
     alpha     = img.split()[3]
     rgb       = img.convert("RGB")
     # FLOYDSTEINBERG dithering preserves gradients better than flat quantization
+    dither_method = Image.Dither.FLOYDSTEINBERG if use_dither else Image.Dither.NONE
     quantized = rgb.quantize(colors=max_colors, method=Image.Quantize.MEDIANCUT,
-                             dither=Image.Dither.FLOYDSTEINBERG)
+                             dither=dither_method)
     result    = quantized.convert("RGBA")
     result.putalpha(alpha)
     return result
 
-def snap_to_palette(img, max_colors=None):
-    """Remap every pixel to the game's 84 built-in palette colors using
-    Floyd-Steinberg dithering to preserve gradients and smooth transitions.
+def snap_to_palette(img, max_colors=None, use_dither=True):
+    """Remap every pixel to the game's 84 built-in palette colors.
+    By default uses Floyd-Steinberg dithering to preserve gradients and smooth transitions.
     If max_colors is given, first find the N palette colors that best represent
-    the image, then dither into only those N colors."""
+    the image, then dither into only those N colors (unless dithering is disabled)."""
     alpha          = img.split()[3]
     rgb            = img.convert("RGB")
     palette_colors = list(PALETTE_COLORS.keys())
@@ -1180,13 +1205,14 @@ def snap_to_palette(img, max_colors=None):
     flat.extend([0, 0, 0] * (256 - len(active_palette)))
     pal_img.putpalette(flat)
 
-    # Dither into the restricted palette
-    snapped = rgb.quantize(palette=pal_img, dither=Image.Dither.FLOYDSTEINBERG)
+    # Dither into the restricted palette (or use flat colors)
+    dither_method = Image.Dither.FLOYDSTEINBERG if use_dither else Image.Dither.NONE
+    snapped = rgb.quantize(palette=pal_img, dither=dither_method)
     result  = snapped.convert("RGBA")
     result.putalpha(alpha)
     return result
 
-def load_image(path, quantize_colors=None, snap=False, snap_colors=None):
+def load_image(path, quantize_colors=None, snap=False, snap_colors=None, preview_path=None, use_dither=True):
     try:
         img = Image.open(path).convert("RGBA")
     except FileNotFoundError:
@@ -1196,16 +1222,24 @@ def load_image(path, quantize_colors=None, snap=False, snap_colors=None):
         console.print(f"[bold red]Error:[/bold red] Could not open image: {e}")
         sys.exit(1)
 
-    if img.width != 256 or img.height != 256:
-        console.print(f"[bold red]Error:[/bold red] Image must be 256×256 pixels, got {img.width}×{img.height}.")
+    if img.width != CANVAS_WIDTH or img.height != CANVAS_HEIGHT:
+        console.print(f"[bold red]Error:[/bold red] Image must be {CANVAS_WIDTH}×{CANVAS_HEIGHT} pixels, got {img.width}×{img.height}.")
         console.print("       Please resize your image before using this tool.")
         sys.exit(1)
 
     if quantize_colors is not None:
-        img = quantize_image(img, quantize_colors)
+        img = quantize_image(img, quantize_colors, use_dither=use_dither)
 
     if snap:
-        img = snap_to_palette(img, max_colors=snap_colors)
+        img = snap_to_palette(img, max_colors=snap_colors, use_dither=use_dither)
+
+    # Save preview if requested
+    if preview_path is not None:
+        try:
+            img.save(preview_path)
+            console.print(f"[green]Preview saved to:[/green] [cyan]{preview_path}[/cyan]")
+        except Exception as e:
+            console.print(f"[bold yellow]Warning:[/bold yellow] Could not save preview: {e}")
 
     color_pixels = {}
     for y in range(img.height):
@@ -1348,7 +1382,7 @@ def build_color_grid(color_pixels, color):
 
 class MockController(Controller):
     """Mock controller for time estimation. Simulates without sending actual commands."""
-    
+
     def __init__(self, device_type, hold_ms=35, gap_ms=35):
         self.device = device_type
         self.hold_ms = hold_ms
@@ -1356,14 +1390,14 @@ class MockController(Controller):
         self.elapsed_ms = 0
         self.phase_times = {}
         self.current_phase = None
-    
+
     def start_phase(self, phase_name):
         """Start tracking a new phase."""
         if self.current_phase and self.current_phase not in self.phase_times:
             self.phase_times[self.current_phase] = 0
         self.current_phase = phase_name
         self._phase_start_ms = self.elapsed_ms
-    
+
     def end_phase(self):
         """End the current phase and record its time."""
         if self.current_phase:
@@ -1372,42 +1406,42 @@ class MockController(Controller):
                 self.phase_times[self.current_phase] = 0
             self.phase_times[self.current_phase] += phase_duration
             self.current_phase = None
-    
+
     def send(self, buttons=0, dpad=8):
         """Mock send - no-op."""
         pass
-    
+
     def press(self, buttons=0, dpad=8, hold_ms=None, gap_ms=None):
         hold = hold_ms if hold_ms is not None else self.hold_ms
         gap = gap_ms if gap_ms is not None else self.gap_ms
         self.elapsed_ms += hold + gap
-    
+
     def move(self, dpad_dir, count, hold_ms=None, gap_ms=None):
         if count <= 0:
             return
         hold = hold_ms if hold_ms is not None else self.hold_ms
         gap = gap_ms if gap_ms is not None else self.gap_ms
         self.elapsed_ms += gap + (count * (hold + gap))
-    
+
     def move_2d(self, dx, dy):
         if dx == 0 and dy == 0:
             return
         steps_diagonal = min(abs(dx), abs(dy))
         remaining_x = abs(dx) - steps_diagonal
         remaining_y = abs(dy) - steps_diagonal
-        
+
         if steps_diagonal > 0:
             self.move(self.DPAD_NEUTRAL, steps_diagonal)
         if remaining_x > 0:
             self.move(self.DPAD_NEUTRAL, remaining_x)
         if remaining_y > 0:
             self.move(self.DPAD_NEUTRAL, remaining_y)
-    
+
     def draw_run(self, dpad_dir, count):
         if count <= 0:
             return
         self.elapsed_ms += (count * (self.hold_ms + self.gap_ms)) + self.gap_ms
-    
+
     def neutral(self):
         """Mock neutral - no-op."""
         pass
@@ -1503,6 +1537,15 @@ def calculate_time_estimate(color_pixels, batch_plans, hold_ms=35, gap_ms=35):
         "best_batches":    best_batches,
     }
 
+def format_time(minutes):
+    """Format time in a human-readable way (hours and minutes for long durations)."""
+    if minutes >= 60:
+        hours = int(minutes // 60)
+        remaining_min = minutes % 60
+        return f"{hours}h {remaining_min:.1f}min"
+    else:
+        return f"{minutes:.1f} min"
+
 def print_estimate(est):
     table = Table(title="  Time Estimate Breakdown", show_header=False, box=None, padding=(0, 2))
     table.add_column("Phase", style="cyan")
@@ -1513,13 +1556,13 @@ def print_estimate(est):
         for phase_name, seconds in phase_breakdown.items():
             minutes = seconds / 60
             if minutes >= 1:
-                table.add_row(phase_name, f"{minutes:.1f} min ({seconds:.0f}s)")
+                table.add_row(phase_name, f"{format_time(minutes)} ({seconds:.0f}s)")
             else:
                 table.add_row(phase_name, f"{seconds:.1f}s")
         table.add_row("", "")
 
     table.add_row("[bold]Total[/bold]",
-                  f"[bold]{est['total_min']:.1f} min[/bold]")
+                  f"[bold]{format_time(est['total_min'])}[/bold]")
     table.add_row("[dim]Algorithm[/dim]",
                   f"[dim]{est.get('algorithm_name', 'Unknown')}[/dim]")
     console.print(table)
@@ -1595,7 +1638,7 @@ def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
         )
     else:
         progress_context = None
-    
+
     if progress_context:
         progress_context.__enter__()
         progress = progress_context
@@ -1610,7 +1653,7 @@ def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
             # Start palette setup phase
             if simulate and isinstance(ctrl, MockController) and batch_num == 0:
                 ctrl.start_phase("Palette Setup")
-            
+
             # Fill palette slots for this batch
             for slot, color in enumerate(batch):
                 r, g, b = color
@@ -1622,11 +1665,11 @@ def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
                             f"[rgb({r},{g},{b})]█[/rgb({r},{g},{b})] RGB({r},{g},{b})"
                         ))
                 fill_palette_slot(ctrl, slot, r, g, b)
-            
+
             # End palette setup phase after first batch
             if simulate and isinstance(ctrl, MockController) and batch_num == 0:
                 ctrl.end_phase()
-            
+
             # Start drawing phase
             if simulate and isinstance(ctrl, MockController) and batch_num == 0:
                 ctrl.start_phase("Drawing")
@@ -1650,7 +1693,7 @@ def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
             draw_fn(ctrl, grids, cursor_pos, progress_context, row_task, batch_pixels,
                     simulate=simulate, component_cache=component_cache,
                     batch_colors=batch)
-            
+
             if progress_context:
                 progress.advance(batch_task)
 
@@ -1660,7 +1703,7 @@ def draw_image(ctrl, color_pixels, batches, est=None, show_progress=True,
                     f"  Batch {batch_num+1}/{len(batches)} complete — "
                     f"elapsed: {str(elapsed).split('.')[0]}"
                 )
-        
+
         # End drawing phase
         if simulate and isinstance(ctrl, MockController):
             ctrl.end_phase()
@@ -1685,32 +1728,101 @@ def parse_args():
 Examples:
   python PaintMii.py art.png
   python PaintMii.py art.png --quantize 32
-  python PaintMii.py art.png --snap
-  python PaintMii.py art.png --snap 32
+  python PaintMii.py art.png --snap --preview preview.png
+  python PaintMii.py art.png --snap --no-dither
   python PaintMii.py art.png --timing 40
-  python PaintMii.py art.png --dry-run
+  python PaintMii.py art.png --dry-run --preview preview.png
+  python PaintMii.py --test-connection
         """
     )
-    parser.add_argument("image",
-        help="Path to a 256×256 PNG image")
+    parser.add_argument("image", nargs="?",
+        help="Path to an image file (256×256 pixels)")
     parser.add_argument("--timing", type=int, default=35, metavar="MS",
         help="Hold/gap timing in milliseconds (default: 35)")
     parser.add_argument("--quantize", type=int, metavar="N",
-        help="Quantize image to N colors (1-100) with dithering before drawing")
+        help="Quantize image to N colors (1-32) with dithering before drawing")
     parser.add_argument("--snap", nargs="?", const=True, metavar="N",
         help="Snap colors to the game's 84-color palette with dithering. "
              "Optionally limit to N palette colors (e.g. --snap 32)")
+    parser.add_argument("--no-dither", action="store_true",
+        help="Disable dithering for flat colors (use with --quantize or --snap)")
     parser.add_argument("--dry-run", action="store_true",
         help="Show time estimate without connecting to the device")
+    parser.add_argument("--preview", metavar="FILE",
+        help="Save a preview of the processed image (after quantization/snapping) to FILE")
+    parser.add_argument("--test-connection", action="store_true",
+        help="Test device connection and exit (no image required)")
     return parser.parse_args()
+
+def test_device_connection():
+    """Test device connection and report status."""
+    console.rule("[bold]Device Connection Test[/bold]")
+    console.print("\n[cyan]Scanning for SwiCC/2wiCC device...[/cyan]")
+
+    port, _ = find_controller_port()
+    if port is None:
+        console.print("[bold red]✗ No device found[/bold red]")
+        console.print("\nTroubleshooting:")
+        console.print("  • Ensure SwiCC/2wiCC is connected to your computer via USB")
+        console.print("  • Ensure SwiCC/2wiCC is connected to your Switch/Switch 2")
+        console.print("  • Verify the console is powered on")
+        console.print("  • Try unplugging and replugging the USB cable")
+        sys.exit(1)
+
+    console.print(f"[green]✓ Device found on port:[/green] [cyan]{port}[/cyan]")
+
+    # Attempt connection
+    console.print("\n[cyan]Connecting at 115200 baud...[/cyan]")
+    try:
+        ser = serial.Serial(port, 115200, timeout=1)
+    except serial.SerialException as e:
+        console.print(f"[bold red]✗ Connection failed:[/bold red] {e}")
+        sys.exit(1)
+
+    console.print("[green]✓ Connected successfully[/green]")
+    time.sleep(2)
+
+    # Identify device type
+    console.print("\n[cyan]Identifying device type...[/cyan]")
+    device_type = detect_device_type(ser)
+    console.print(f"[green]✓ Device type:[/green] [cyan]{device_type.upper()}[/cyan]")
+
+    # If 2wiCC, test high-speed connection
+    if device_type == "2wicc":
+        console.print("\n[cyan]Testing high-speed connection (460800 baud)...[/cyan]")
+        ser.close()
+        try:
+            ser = serial.Serial(port, 460800, timeout=1)
+            console.print("[green]✓ High-speed connection successful[/green]")
+        except serial.SerialException as e:
+            console.print(f"[bold red]✗ High-speed connection failed:[/bold red] {e}")
+            sys.exit(1)
+        time.sleep(1)
+
+    ser.close()
+
+    console.print("\n[bold green]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold green]")
+    console.print("[bold green]✓ All connection tests passed![/bold green]")
+    console.print("[bold green]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold green]")
+    console.print("\nYour device is ready to use. You can now run PaintMii with an image.")
 
 def main():
     global _controller_ref
 
     args = parse_args()
 
-    if args.quantize is not None and not (1 <= args.quantize <= 100):
-        console.print("[bold red]Error:[/bold red] --quantize must be between 1 and 100.")
+    # Handle test connection mode
+    if args.test_connection:
+        test_device_connection()
+        return
+
+    # Require image for normal operation
+    if not args.image:
+        console.print("[bold red]Error:[/bold red] Image argument is required (or use --test-connection)")
+        sys.exit(1)
+
+    if args.quantize is not None and not (1 <= args.quantize <= 32):
+        console.print("[bold red]Error:[/bold red] --quantize must be between 1 and 32.")
         sys.exit(1)
 
     # Parse --snap: may be True (no value), an int string, or None
@@ -1741,7 +1853,9 @@ def main():
     color_pixels, img = load_image(args.image,
                                    quantize_colors=args.quantize,
                                    snap=snap,
-                                   snap_colors=snap_colors)
+                                   snap_colors=snap_colors,
+                                   preview_path=args.preview,
+                                   use_dither=not args.no_dither)
 
     if args.quantize or snap:
         console.print(f"[green]Done.[/green] {len(color_pixels)} colors.")
@@ -1763,7 +1877,7 @@ def main():
 
     if est["colors"] > 100:
         console.print(f"\n[bold yellow]Warning:[/bold yellow] {est['colors']} unique colors — "
-                      f"estimated [bold]{est['total_min']:.0f}+ minutes[/bold].")
+                      f"estimated [bold]{format_time(est['total_min'])}+[/bold].")
         console.print("   Consider [bold]--quantize 64[/bold] to reduce colors, or")
         console.print("   [bold]--snap 32[/bold] to map to the game's built-in palette.")
         if console.input("Continue anyway? [y/N]: ").strip().lower() != 'y':
