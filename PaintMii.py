@@ -11,7 +11,7 @@ Usage:
 
 Options:
     --timing MS         Hold/gap timing in ms (default: 35)
-    --quantize N        Quantize image to N colors before drawing (1-100, uses dithering by default)
+    --quantize N        Quantize image to N colors before drawing (1-32, uses dithering by default)
     --snap [N]          Snap to game's palette colors (optionally limit to N colors, uses dithering by default)
     --no-dither         Disable dithering for flat colors (use with --quantize or --snap)
     --preview FILE      Save a preview of the processed image to FILE
@@ -1740,7 +1740,7 @@ Examples:
     parser.add_argument("--timing", type=int, default=35, metavar="MS",
         help="Hold/gap timing in milliseconds (default: 35)")
     parser.add_argument("--quantize", type=int, metavar="N",
-        help="Quantize image to N colors (1-100) with dithering before drawing")
+        help="Quantize image to N colors (1-32) with dithering before drawing")
     parser.add_argument("--snap", nargs="?", const=True, metavar="N",
         help="Snap colors to the game's 84-color palette with dithering. "
              "Optionally limit to N palette colors (e.g. --snap 32)")
@@ -1821,8 +1821,8 @@ def main():
         console.print("[bold red]Error:[/bold red] Image argument is required (or use --test-connection)")
         sys.exit(1)
 
-    if args.quantize is not None and not (1 <= args.quantize <= 100):
-        console.print("[bold red]Error:[/bold red] --quantize must be between 1 and 100.")
+    if args.quantize is not None and not (1 <= args.quantize <= 32):
+        console.print("[bold red]Error:[/bold red] --quantize must be between 1 and 32.")
         sys.exit(1)
 
     # Parse --snap: may be True (no value), an int string, or None

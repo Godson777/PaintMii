@@ -41,7 +41,7 @@ PaintMii <image.png> [options]
 
 **Options:**
 - `--timing MS` - Button press/release timing in milliseconds (default: 35)
-- `--quantize N` - Quantize image to N colors before drawing (1-100, uses dithering by default)
+- `--quantize N` - Quantize image to N colors before drawing (1-32, uses dithering by default)
 - `--snap [N]` - Snap to game's 84-color palette (optionally limit to N colors, uses dithering by default)
 - `--no-dither` - Disable dithering for flat colors (use with `--quantize` or `--snap`)
 - `--preview FILE` - Save a preview of the processed image showing what colors will be drawn
